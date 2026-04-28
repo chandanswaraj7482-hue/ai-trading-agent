@@ -1,6 +1,8 @@
 import pandas as pd
 import ta
 import numpy as np
+from sklearn.ensemble import RandomForestRegressor
+from datetime import timedelta
 
 def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -27,6 +29,9 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
         bollinger = ta.volatility.BollingerBands(close=df['Close'], window=20, window_dev=2)
         df['BB_High'] = bollinger.bollinger_hband()
         df['BB_Low'] = bollinger.bollinger_lband()
+        
+        # ATR (Average True Range) for Smart Risk Management
+        df['ATR'] = ta.volatility.AverageTrueRange(high=df['High'], low=df['Low'], close=df['Close'], window=14).average_true_range()
         
     except Exception as e:
         print(f"Error adding indicators: {e}")
@@ -74,30 +79,185 @@ def get_latest_signal(df: pd.DataFrame) -> dict:
     current_price = latest['Close']
     signal = latest['Signal']
     
-    if pd.isna(signal):
-        return {"action": "HOLD", "reason": "Calculating indicators..."}
+    atr = latest.get('ATR', current_price * 0.02)
+    if pd.isna(atr):
+        atr = current_price * 0.02
         
-    if signal == 1:
+    score_data = calculate_ai_score(df)
+    score = score_data['score']
+    
+    # Generate Target and Stop Loss based on current price and ATR regardless of strict signal
+    buy_target = current_price + (2.0 * atr)
+    buy_stop = current_price - (1.5 * atr)
+    sell_target = current_price - (2.0 * atr)
+    sell_stop = current_price + (1.5 * atr)
+    
+    if signal == 1 or score >= 60:
         return {
             "action": "BUY 🟢",
             "entry": current_price,
-            "target": current_price * 1.05, # 5% profit target
-            "stop_loss": current_price * 0.98, # 2% stop loss
-            "reason": "AI Analysis: Market ka trend positive hai aur price upar jane ke chances zyada hain. Aap is price par buy kar sakte hain."
+            "target": buy_target,
+            "stop_loss": buy_stop,
+            "reason": "AI Analysis: Trend positive hai. ATR ke hisaab se Stop-Loss aur Target set kiya gaya hai."
         }
-    elif signal == -1:
+    elif signal == -1 or score <= 40:
         return {
             "action": "SELL 🔴",
             "entry": current_price,
-            "target": current_price * 0.95, 
-            "stop_loss": current_price * 1.02,
-            "reason": "AI Analysis: Market mein girawat (downtrend) aane ki sambhavna hai. Agar aapne pehle se buy kiya hai, to abhi bechna safe rahega."
+            "target": sell_target, 
+            "stop_loss": sell_stop,
+            "reason": "AI Analysis: Market mein girawat aane ki sambhavna hai. Bechna safe rahega."
         }
     else:
         return {
             "action": "HOLD ⚪",
             "entry": current_price,
-            "target": None,
-            "stop_loss": None,
-            "reason": "AI Analysis: Market abhi confuse hai (na upar ja raha hai na niche). Abhi koi naya trade mat lijiye, thoda wait kijiye."
+            "target": buy_target, # Give potential levels even for hold
+            "stop_loss": buy_stop,
+            "reason": "AI Analysis: Market abhi confuse hai. Agar aap risk lena chahte hain to Target/Stop-Loss limits dekh sakte hain."
         }
+
+def predict_future_price(df: pd.DataFrame, days: int = 7) -> dict:
+    """
+    Predict future price using RandomForestRegressor based on the last 30 days of data.
+    """
+    if df.empty or len(df) < 30:
+        return {"status": "error", "message": "Not enough data for prediction"}
+        
+    # Use last 30 days to train an advanced Random Forest model
+    recent_df = df.tail(30).copy()
+    recent_df['DayIndex'] = np.arange(len(recent_df))
+    
+    X = recent_df[['DayIndex']].values
+    y = recent_df['Close'].values
+    
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    model.fit(X, y)
+    
+    # Predict X days into the future
+    future_X = np.array([[len(recent_df) + days - 1]])
+    predicted_price = model.predict(future_X)[0]
+    
+    current_price = y[-1]
+    trend = "UP 📈" if predicted_price > current_price else "DOWN 📉"
+    
+    return {
+        "status": "success",
+        "predicted_price": predicted_price,
+        "trend": trend,
+        "days": days
+    }
+
+def run_backtest(df: pd.DataFrame, initial_capital: float = 10000.0) -> dict:
+    """
+    Simulate trading over the historical data using the generated signals.
+    """
+    if df.empty or 'Signal' not in df.columns:
+        return {"profit_percentage": 0, "final_capital": initial_capital, "trades": 0}
+        
+    capital = initial_capital
+    position = 0 # 0 means no stock, 1 means holding stock
+    buy_price = 0
+    trades_executed = 0
+    
+    for i in range(len(df)):
+        signal = df['Signal'].iloc[i]
+        price = df['Close'].iloc[i]
+        
+        # Buy condition
+        if signal == 1 and position == 0:
+            position = capital / price # Buy as many shares as possible
+            capital = 0
+            buy_price = price
+            trades_executed += 1
+            
+        # Sell condition
+        elif signal == -1 and position > 0:
+            capital = position * price # Sell all shares
+            position = 0
+            trades_executed += 1
+            
+    # Calculate final value if still holding at the end
+    if position > 0:
+        capital = position * df['Close'].iloc[-1]
+        
+    profit = capital - initial_capital
+    profit_pct = (profit / initial_capital) * 100
+    
+    return {
+        "initial": initial_capital,
+        "final": capital,
+        "profit_pct": profit_pct,
+        "trades": trades_executed
+    }
+
+def calculate_ai_score(df: pd.DataFrame) -> dict:
+    """
+    Calculate an AI Confidence Score (0-100) based on multiple technical factors.
+    """
+    if df.empty or len(df) < 5:
+        return {"score": 0, "label": "Unknown"}
+        
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    score = 50 # Start neutral
+    
+    # Factor 1: Trend (Price vs SMA 50 and SMA 20)
+    sma50 = latest.get('SMA_50', 0)
+    sma20 = latest.get('SMA_20', 0)
+    close = latest['Close']
+    
+    if not pd.isna(sma50) and not pd.isna(sma20):
+        if close > sma20 > sma50: score += 20
+        elif close > sma50: score += 10
+        elif close < sma20 < sma50: score -= 20
+        elif close < sma50: score -= 10
+        
+    # Factor 2: Momentum (RSI)
+    rsi = latest.get('RSI', 50)
+    if not pd.isna(rsi):
+        if 40 <= rsi <= 60: score += 5
+        elif 30 <= rsi < 40: score += 15 # Nearing oversold, good value
+        elif rsi < 30: score += 25 # Oversold bounce potential
+        elif 60 < rsi <= 70: score -= 5
+        elif rsi > 70: score -= 25 # Overbought, risky
+        
+    # Factor 3: MACD Momentum
+    macd = latest.get('MACD', 0)
+    macd_sig = latest.get('MACD_Signal', 0)
+    if not pd.isna(macd) and not pd.isna(macd_sig):
+        if macd > macd_sig: 
+            # Is the gap widening?
+            prev_macd = prev.get('MACD', 0)
+            prev_sig = prev.get('MACD_Signal', 0)
+            if (macd - macd_sig) > (prev_macd - prev_sig):
+                score += 15 # Strong momentum
+            else:
+                score += 5 # Weakening momentum
+        else:
+            score -= 15
+            
+    # Factor 4: Bollinger Band Position
+    bb_low = latest.get('BB_Low', 0)
+    bb_high = latest.get('BB_High', 0)
+    if not pd.isna(bb_low) and not pd.isna(bb_high) and (bb_high - bb_low) > 0:
+        position = (close - bb_low) / (bb_high - bb_low)
+        if position < 0.2: score += 10 # Near bottom band
+        elif position > 0.8: score -= 10 # Near top band
+        
+    # Cap score between 0 and 100
+    score = max(0, min(100, score))
+    
+    if score >= 75:
+        label = "Strong Buy 🔥"
+    elif score >= 60:
+        label = "Buy 👍"
+    elif score <= 25:
+        label = "Strong Sell 🛑"
+    elif score <= 40:
+        label = "Sell 👎"
+    else:
+        label = "Hold ⚪"
+        
+    return {"score": int(score), "label": label}
