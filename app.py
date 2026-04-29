@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+import numpy as np
 import sys
 import importlib
 
@@ -10,9 +11,13 @@ if "strategy" in sys.modules:
 if "data_collector" in sys.modules:
     importlib.reload(sys.modules["data_collector"])
 
-from data_collector import fetch_historical_data
-from strategy import add_technical_indicators, generate_signals, get_latest_signal, predict_future_price, run_backtest, calculate_ai_score
+from data_collector import fetch_historical_data, get_option_expiry_dates, get_option_chain
+from strategy import (add_technical_indicators, generate_signals, get_latest_signal, 
+                      predict_future_price, run_backtest, calculate_ai_score, 
+                      calculate_greeks, suggest_option_strategies, calculate_pcr, 
+                      calculate_max_pain, generate_synthetic_option_chain)
 from sentiment import analyze_sentiment
+from datetime import datetime
 
 # Setup page configuration
 st.set_page_config(page_title="AI Trading Pro", layout="wide", page_icon="⚡")
@@ -113,7 +118,13 @@ with st.sidebar:
     analyze_button = st.button("Analyze Now 🚀")
 
 # Create Tabs
-tab_guide, tab_screener, tab_single = st.tabs(["🎓 Start Here (For Beginners)", "🤖 Auto-Suggest (Best Stocks)", "🔍 Search Any Stock"])
+tab_guide, tab_screener, tab_single, tab_options, tab_risk = st.tabs([
+    "🎓 Start Here", 
+    "🤖 Auto-Suggest", 
+    "🔍 Search Any Stock",
+    "📊 Options Hub",
+    "🛡️ Risk Manager"
+])
 
 with tab_guide:
     st.header("Trading mein naye hain? Koi baat nahi! 🤗")
@@ -256,7 +267,11 @@ with tab_single:
 
 with tab_screener:
     st.header("🤖 Top Investment Suggestions")
-    st.markdown("Aapko manually search karne ki zarurat nahi hai! AI khud Nifty 50 ke top stocks ko analyze karke batayega ki **aaj kya buy karna chahiye.**")
+    st.markdown("Aapko manually search karne ki zarurat nahi hai! AI khud Nifty 50 ke stocks ko scan karke batayega ki **aaj kya buy karna chahiye.**")
+    
+    col_b1, col_b2 = st.columns(2)
+    with col_b1:
+        max_price = st.number_input("Aapka per share budget kitna hai? (₹):", value=5000, step=100)
     
     # List of Nifty 50 stocks to scan
     top_stocks = [
@@ -287,6 +302,11 @@ with tab_screener:
                 df_scan = add_technical_indicators(df_scan)
                 df_scan = generate_signals(df_scan)
                 sig = get_latest_signal(df_scan)
+                
+                # --- BUDGET FILTER ---
+                if sig['entry'] > max_price:
+                    continue
+                    
                 score_data = calculate_ai_score(df_scan)
                 
                 all_results.append({
@@ -317,3 +337,233 @@ with tab_screener:
             st.info("💡 Note: Jis stock ka AI Score sabse zyada hai (jaise Strong Buy 🔥), usme invest karna sabse safe hai.")
         else:
             st.warning("Data fetch karne mein problem aayi. Kripya baad mein try karein.")
+
+with tab_options:
+    st.header("📊 Options Hub - Derivative Analysis")
+    st.markdown("""
+    Options trading mein risk zyada hota hai lekin munafa bhi fast ho sakta hai. 
+    Yahan aap **Option Chain** dekh sakte hain aur AI se **Best Strategy** puch sakte hain.
+    """)
+    
+    opt_col1, opt_col2 = st.columns([1, 2])
+    
+    with opt_col1:
+        f_and_o_stocks = [
+            "Select Stock...", "NIFTY (^NSEI)", "BANK NIFTY (^NSEBANK)", 
+            "RELIANCE.NS", "HDFCBANK.NS", "ICICIBANK.NS", "TCS.NS", "INFY.NS", 
+            "TATAMOTORS.NS", "SBIN.NS", "ADANIENT.NS"
+        ]
+        
+        # Function to update ticker when dropdown changes
+        def update_ticker():
+            if st.session_state.stock_select != "Select Stock...":
+                val = st.session_state.stock_select
+                ticker = val.split(" (")[1].replace(")", "") if " (" in val else val
+                st.session_state.opt_ticker = ticker
+
+        st.selectbox("Quick Select (Popular Stocks):", f_and_o_stocks, key="stock_select", on_change=update_ticker)
+        opt_ticker = st.text_input("Or Enter Custom Ticker:", key="opt_ticker", value="RELIANCE.NS")
+        
+        if st.button("Fetch Option Chain 🔍"):
+            with st.spinner("Fetching Expiry Dates..."):
+                expiries = get_option_expiry_dates(opt_ticker)
+                if expiries:
+                    st.session_state['expiries'] = expiries
+                    st.session_state['selected_ticker'] = opt_ticker
+                    st.session_state['use_synthetic'] = False
+                else:
+                    st.info("💡 **Bhai dhyan dein:** Free APIs (Yahoo Finance) NSE Options data aksar block kar dete hain. Lekin fikr mat kijiye, humara AI **Real-time Spot Price** use karke premiums calculate kar lega!")
+                    st.session_state['expiries'] = ["Current Month (AI Model)"]
+                    st.session_state['selected_ticker'] = opt_ticker
+                    st.session_state['use_synthetic'] = True
+        
+        if 'expiries' in st.session_state and st.session_state['selected_ticker'] == opt_ticker:
+            selected_expiry = st.selectbox("Select Expiry Date:", st.session_state['expiries'])
+            
+            if st.button("Analyze Options ⚡"):
+                with st.spinner("Analyzing Option Chain & Greeks..."):
+                    # Fetch data for technical context
+                    df_opt = fetch_historical_data(opt_ticker, period="6mo")
+                    df_opt = add_technical_indicators(df_opt)
+                    df_opt = generate_signals(df_opt)
+                    latest_sig = get_latest_signal(df_opt)
+                    score_data = calculate_ai_score(df_opt)
+                    curr_price = df_opt['Close'].iloc[-1]
+                    
+                    # Fetch Option Chain
+                    is_synthetic = st.session_state.get('use_synthetic', False)
+                    if is_synthetic:
+                        st.info(f"✅ **LIVE Spot Price detected: ₹{curr_price:.2f}**. AI premiums calculate kar raha hai...")
+                        calls, puts = generate_synthetic_option_chain(curr_price)
+                    else:
+                        calls, puts = get_option_chain(opt_ticker, selected_expiry)
+                        if calls.empty or puts.empty:
+                            st.warning("⚠️ Real-time NSE Options fetch failed. Switching to AI-Model based on Live Price.")
+                            calls, puts = generate_synthetic_option_chain(curr_price)
+                            is_synthetic = True
+                    
+                    # Strategy Suggestions
+                    st.session_state['opt_analysis'] = {
+                        "ticker": opt_ticker,
+                        "expiry": selected_expiry,
+                        "calls": calls,
+                        "puts": puts,
+                        "signal": latest_sig,
+                        "score": score_data,
+                        "price": curr_price,
+                        "is_synthetic": is_synthetic
+                    }
+
+    if 'opt_analysis' in st.session_state:
+        analysis = st.session_state['opt_analysis']
+        
+        # --- ADVANCED METRICS CARDS ---
+        pcr = calculate_pcr(analysis['calls'], analysis['puts'])
+        max_pain = calculate_max_pain(analysis['calls'], analysis['puts'])
+        
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            st.metric("Put-Call Ratio (PCR)", pcr, delta="Bullish" if pcr > 1 else "Bearish")
+        with m2:
+            st.metric("Max Pain Strike", f"₹{max_pain:.0f}")
+        with m3:
+            vol = "22% (Normal)" if not analysis['is_synthetic'] else "20% (Est.)"
+            st.metric("Implied Volatility", vol)
+
+        st.markdown("---")
+        st.subheader(f"🤖 AI Recommended Strategies for {analysis['ticker']}")
+        
+        rec_strategies = suggest_option_strategies(
+            analysis['ticker'], 
+            analysis['price'], 
+            analysis['signal'], 
+            analysis['score']['score']
+        )
+        
+        for strat in rec_strategies:
+            with st.expander(f"✨ Strategy: {strat['name']} ({strat['type']})"):
+                c1, c2 = st.columns([1, 1])
+                with c1:
+                    st.markdown(f"**Setup:** {strat['setup']}")
+                    st.markdown(f"**Benefit:** {strat['benefit']}")
+                    st.success("AI Logic: Is strategy mein risk limited hai aur profit hone ke chances zyada hain.")
+                with c2:
+                    # Simple Payoff Visualization placeholder
+                    st.markdown("**Potential Payoff Chart:**")
+                    x = np.linspace(analysis['price'] * 0.9, analysis['price'] * 1.1, 100)
+                    if "Bull" in strat['name']:
+                        y = np.where(x < analysis['price'], -10, (x - analysis['price']) * 2 - 10)
+                        y = np.clip(y, -10, 30) # Capped profit for spreads
+                    else:
+                        y = np.where(x > analysis['price'], -10, (analysis['price'] - x) * 2 - 10)
+                        y = np.clip(y, -10, 30)
+                        
+                    fig_p = go.Figure()
+                    fig_p.add_trace(go.Scatter(x=x, y=y, fill='tozeroy', name='Profit/Loss', line=dict(color='cyan')))
+                    fig_p.update_layout(height=200, margin=dict(l=0,r=0,t=0,b=0), template="plotly_dark")
+                    st.plotly_chart(fig_p, use_container_width=True)
+
+        # Option Chain Display
+        st.markdown("---")
+        st.subheader(f"📑 Option Chain - {analysis['expiry']}")
+        
+        # Merge calls and puts for a cleaner view
+        chain_view = pd.merge(
+            analysis['calls'][['strike', 'lastPrice', 'change', 'openInterest']], 
+            analysis['puts'][['strike', 'lastPrice', 'change', 'openInterest']], 
+            on='strike', suffixes=('_Call', '_Put')
+        ).sort_values('strike')
+        
+        # Filter around ATM
+        atm_strike = analysis['price']
+        chain_view = chain_view[
+            (chain_view['strike'] >= atm_strike * 0.9) & 
+            (chain_view['strike'] <= atm_strike * 1.1)
+        ]
+        
+        # Option Chain Display with styling (safely handled if matplotlib is missing)
+        try:
+            st.dataframe(chain_view.style.background_gradient(subset=['openInterest_Call', 'openInterest_Put'], cmap='Blues'), use_container_width=True)
+        except Exception:
+            st.dataframe(chain_view, use_container_width=True)
+        
+        st.caption("💡 Tip: 'Open Interest' (OI) batata hai ki kitne contracts active hain. Zyada OI matlab wahan support ya resistance ho sakta hai.")
+
+    st.markdown("---")
+    with st.expander("🎓 **Beginner's Corner: Options Kya Hain? (Read this if you're new)**"):
+        st.markdown("""
+        Agar aapko trading ke bare mein kuch nahi pata, to ye 3 baatein yaad rakhein:
+        
+        1. **Options Kya Hain?**: Options ek tarah ka insurance ya contract hote hain. Aap predict karte hain ki market upar jayega (**Call**) ya niche (**Put**).
+        2. **Call vs Put**: 
+            - **Call (CE)**: Jab aapko lagta hai market **Upar** jayega.
+            - **Put (PE)**: Jab aapko lagta hai market **Niche** jayega.
+        3. **Expiry**: Har option contract ki ek 'Expiry' date hoti hai. Us date ke baad wo contract zero ya settle ho jata hai.
+        
+        ### 🛡️ Safe Reccomendation:
+        Naye traders ke liye **'Bull Call Spread'** ya **'Bear Put Spread'** sabse safe hote hain kyunki isme aapka loss limited hota hai. AI aapko wahi suggest karega!
+        
+        *Dhyan rahe: Options trading mein risk hota hai, hamesha kam capital se start karein.*
+        """)
+
+with tab_risk:
+    st.header("🛡️ Risk & Position Sizing Manager")
+    st.markdown("""
+    Trading mein sabse zaroori ye nahi hai ki aap kitna kamate hain, balki ye hai ki aap **kitna lose karne ko taiyar hain**. 
+    Ye calculator aapko batayega ki aapko kitni quantity khareedni chahiye.
+    """)
+    
+    r_col1, r_col2 = st.columns(2)
+    
+    with r_col1:
+        st.subheader("Your Capital Settings")
+        total_cap = st.number_input("Total Trading Capital (₹):", value=100000, step=5000)
+        risk_pct = st.slider("Risk Per Trade (% of Capital):", 0.5, 5.0, 1.0, 0.5)
+        
+        st.markdown("---")
+        st.subheader("Trade Details")
+        entry_p = st.number_input("Entry Price (Current Rate):", value=1000.0)
+        stop_l = st.number_input("Stop Loss Price:", value=980.0)
+        
+    with r_col2:
+        st.subheader("📊 AI Risk Report")
+        
+        risk_amount = (total_cap * risk_pct) / 100
+        risk_per_share = entry_p - stop_l
+        
+        target_p = st.number_input("Target Price (Expected Profit):", value=entry_p + (risk_per_share * 2))
+        reward_per_share = target_p - entry_p
+        
+        if risk_per_share > 0:
+            quantity = int(risk_amount / risk_per_share)
+            total_investment = quantity * entry_p
+            potential_profit = quantity * reward_per_share
+            rr_ratio = round(reward_per_share / risk_per_share, 2)
+            
+            st.info(f"**Max Risk You Can Take:** ₹{risk_amount:.2f}")
+            st.success(f"**Recommended Quantity to Buy:** {quantity} Shares / Units")
+            
+            m_col1, m_col2 = st.columns(2)
+            with m_col1:
+                st.metric("Potential Profit", f"₹{potential_profit:.2f}")
+            with m_col2:
+                st.metric("Risk-to-Reward Ratio", f"1:{rr_ratio}")
+            
+            if total_investment > total_cap:
+                st.warning(f"⚠️ Warning: Is trade ke liye ₹{total_investment:.2f} chahiye, jo aapke capital se zyada hai.")
+            else:
+                st.metric("Total Investment Required", f"₹{total_investment:.2f}")
+                
+            st.markdown("### 📝 Checklist:")
+            c1 = st.checkbox(f"Kya aap ₹{risk_amount:.2f} ka loss bardasht kar sakte hain?", key="check1")
+            c2 = st.checkbox("Kya aapne Stop-Loss system mein laga diya hai?", key="check2")
+            c3 = st.checkbox("Kya ye trade AI ke 'Strong Buy' signal ke saath match karta hai?", key="check3")
+            
+            if c1 and c2 and c3:
+                st.success("✅ Aap trade lene ke liye taiyar hain! All the best!")
+            else:
+                st.warning("⚠️ Kripya saare points check karein pehle.")
+        else:
+            st.error("Stop Loss entry price se niche hona chahiye!")
+
+    st.caption("💡 Tip: Hamesha 1-2% se zyada risk ek trade mein mat lijiye. Isi se long-term profit banta hai.")

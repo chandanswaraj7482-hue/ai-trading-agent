@@ -6,3 +6,5 @@ vaderSentiment
 beautifulsoup4
 requests
 plotly
+scipy
+matplotlib

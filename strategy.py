@@ -261,3 +261,130 @@ def calculate_ai_score(df: pd.DataFrame) -> dict:
         label = "Hold ⚪"
         
     return {"score": int(score), "label": label}
+
+# --- NEW: OPTIONS MODULE ---
+from scipy.stats import norm
+
+def calculate_greeks(S, K, T, v, r=0.07, option_type='call'):
+    """
+    Calculate Greeks using Black-Scholes model.
+    S: Current Price
+    K: Strike Price
+    T: Time to Expiry (in years)
+    v: Volatility (decimal, e.g. 0.20 for 20%)
+    r: Risk-free rate (default 7% for India)
+    """
+    if T <= 0: return {"delta": 0, "theta": 0, "gamma": 0, "vega": 0}
+    
+    d1 = (np.log(S / K) + (r + 0.5 * v ** 2) * T) / (v * np.sqrt(T))
+    d2 = d1 - v * np.sqrt(T)
+    
+    if option_type == 'call':
+        delta = norm.cdf(d1)
+        theta = -(S * norm.pdf(d1) * v / (2 * np.sqrt(T))) - r * K * np.exp(-r * T) * norm.cdf(d2)
+    else:
+        delta = norm.cdf(d1) - 1
+        theta = -(S * norm.pdf(d1) * v / (2 * np.sqrt(T))) + r * K * np.exp(-r * T) * norm.cdf(-d2)
+        
+    gamma = norm.pdf(d1) / (S * v * np.sqrt(T))
+    vega = S * norm.pdf(d1) * np.sqrt(T)
+    
+    return {
+        "delta": round(delta, 3),
+        "theta": round(theta / 365, 3), # Daily theta
+        "gamma": round(gamma, 4),
+        "vega": round(vega / 100, 3) # Per 1% change
+    }
+
+def suggest_option_strategies(ticker_symbol, current_price, signal_data, ai_score):
+    """
+    Suggest specific option strategies based on technical signals.
+    """
+    strategies = []
+    
+    if "BUY" in signal_data['action'] or ai_score >= 70:
+        strategies.append({
+            "name": "Bull Call Spread",
+            "type": "Bullish (Safe)",
+            "setup": f"Buy 1 ITM Call + Sell 1 OTM Call",
+            "benefit": "Lower cost, limited risk, works in moderate uptrend."
+        })
+        strategies.append({
+            "name": "Naked Call Buy",
+            "type": "Aggressive Bullish",
+            "setup": f"Buy ATM Call",
+            "benefit": "High profit potential if price jumps quickly."
+        })
+    elif "SELL" in signal_data['action'] or ai_score <= 30:
+        strategies.append({
+            "name": "Bear Put Spread",
+            "type": "Bearish (Safe)",
+            "setup": f"Buy 1 ITM Put + Sell 1 OTM Put",
+            "benefit": "Protects against time decay, limited risk."
+        })
+        strategies.append({
+            "name": "Naked Put Buy",
+            "type": "Aggressive Bearish",
+            "setup": f"Buy ATM Put",
+            "benefit": "Profit from fast market fall."
+        })
+    else:
+        strategies.append({
+            "name": "Short Strangle",
+            "type": "Neutral (Sideways)",
+            "setup": "Sell 1 OTM Call + Sell 1 OTM Put",
+            "benefit": "Profit from time decay if market stays range-bound."
+        })
+        
+    return strategies
+
+def calculate_pcr(calls, puts):
+    """Calculate Put-Call Ratio based on Open Interest."""
+    total_call_oi = calls['openInterest'].sum()
+    total_put_oi = puts['openInterest'].sum()
+    if total_call_oi == 0 or pd.isna(total_call_oi): return 0
+    return round(total_put_oi / total_call_oi, 2)
+
+def calculate_max_pain(calls, puts):
+    """
+    Simplified Max Pain calculation.
+    Max Pain is the strike price where the total loss for option buyers is minimum.
+    """
+    if calls.empty or puts.empty: return 0
+    strikes = calls['strike'].values
+    losses = []
+    
+    for strike in strikes:
+        call_loss = calls[calls['strike'] < strike].apply(lambda x: (strike - x['strike']) * x['openInterest'] if not pd.isna(x['openInterest']) else 0, axis=1).sum()
+        put_loss = puts[puts['strike'] > strike].apply(lambda x: (x['strike'] - strike) * x['openInterest'] if not pd.isna(x['openInterest']) else 0, axis=1).sum()
+        losses.append(call_loss + put_loss)
+        
+    if not losses: return 0
+    return strikes[np.argmin(losses)]
+
+def generate_synthetic_option_chain(current_price, volatility=0.20):
+    """
+    Generate a synthetic option chain for demonstration/analysis when real data is missing.
+    """
+    atm_strike = round(current_price / 50) * 50 if current_price > 500 else round(current_price / 10) * 10
+    strikes = [atm_strike + (i * (50 if current_price > 500 else 10)) for i in range(-10, 11)]
+    
+    calls_data = []
+    puts_data = []
+    
+    for K in strikes:
+        greeks = calculate_greeks(current_price, K, 0.05, volatility, option_type='call')
+        # Simple premium approximation
+        c_price = max(1.0, (current_price - K) if current_price > K else (K - current_price) * 0.1)
+        p_price = max(1.0, (K - current_price) if K > current_price else (current_price - K) * 0.1)
+        
+        calls_data.append({
+            'strike': float(K), 'lastPrice': round(c_price, 2), 'change': 0, 
+            'openInterest': int(np.random.randint(1000, 10000)), 'delta': greeks['delta']
+        })
+        puts_data.append({
+            'strike': float(K), 'lastPrice': round(p_price, 2), 'change': 0, 
+            'openInterest': int(np.random.randint(1000, 10000)), 'delta': calculate_greeks(current_price, K, 0.05, volatility, option_type='put')['delta']
+        })
+        
+    return pd.DataFrame(calls_data), pd.DataFrame(puts_data)
