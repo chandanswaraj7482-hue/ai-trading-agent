@@ -461,31 +461,38 @@ with tab_options:
                     fig_p = go.Figure()
                     fig_p.add_trace(go.Scatter(x=x, y=y, fill='tozeroy', name='Profit/Loss', line=dict(color='cyan')))
                     fig_p.update_layout(height=200, margin=dict(l=0,r=0,t=0,b=0), template="plotly_dark")
-                    st.plotly_chart(fig_p, use_container_width=True)
+                    st.plotly_chart(fig_p, use_container_width=True, key=f"payoff_{strat['name'].replace(' ', '_')}")
 
         # Option Chain Display
         st.markdown("---")
         st.subheader(f"📑 Option Chain - {analysis['expiry']}")
         
-        # Merge calls and puts for a cleaner view
-        chain_view = pd.merge(
-            analysis['calls'][['strike', 'lastPrice', 'change', 'openInterest']], 
-            analysis['puts'][['strike', 'lastPrice', 'change', 'openInterest']], 
-            on='strike', suffixes=('_Call', '_Put')
-        ).sort_values('strike')
-        
-        # Filter around ATM
-        atm_strike = analysis['price']
-        chain_view = chain_view[
-            (chain_view['strike'] >= atm_strike * 0.9) & 
-            (chain_view['strike'] <= atm_strike * 1.1)
-        ]
-        
-        # Option Chain Display with styling (safely handled if matplotlib is missing)
-        try:
-            st.dataframe(chain_view.style.background_gradient(subset=['openInterest_Call', 'openInterest_Put'], cmap='Blues'), use_container_width=True)
-        except Exception:
-            st.dataframe(chain_view, use_container_width=True)
+        # Merge calls and puts safely
+        if not analysis['calls'].empty and not analysis['puts'].empty:
+            chain_view = pd.merge(
+                analysis['calls'][['strike', 'lastPrice', 'change', 'openInterest']], 
+                analysis['puts'][['strike', 'lastPrice', 'change', 'openInterest']], 
+                on='strike', suffixes=('_Call', '_Put')
+            ).sort_values('strike')
+            
+            # Filter around ATM or show all
+            show_all = st.checkbox("Show All Strikes", value=False)
+            if not show_all:
+                atm_strike = analysis['price']
+                filtered_view = chain_view[
+                    (chain_view['strike'] >= atm_strike * 0.9) & 
+                    (chain_view['strike'] <= atm_strike * 1.1)
+                ]
+                if not filtered_view.empty:
+                    chain_view = filtered_view
+            
+            # Display Table
+            try:
+                st.dataframe(chain_view.style.background_gradient(subset=['openInterest_Call', 'openInterest_Put'], cmap='Blues'), use_container_width=True)
+            except Exception:
+                st.dataframe(chain_view, use_container_width=True)
+        else:
+            st.warning("Is expiry ke liye options data (Calls/Puts) nahi mil paya.")
         
         st.caption("💡 Tip: 'Open Interest' (OI) batata hai ki kitne contracts active hain. Zyada OI matlab wahan support ya resistance ho sakta hai.")
 
