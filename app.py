@@ -90,7 +90,8 @@ with st.sidebar:
         "Crypto", 
         "Forex (Currencies)", 
         "Commodities (Gold, Oil)", 
-        "Mutual Funds (SIP)"
+        "Mutual Funds (SIP)",
+        "Custom (Any Ticker)"
     ]
     asset_type = st.selectbox("Market Type:", asset_types)
     
@@ -112,6 +113,9 @@ with st.sidebar:
     elif asset_type == "Mutual Funds (SIP)":
         st.info("Mutual Fund ka ticker likhein (e.g., 0P0000XW8F.BO - Parag Parikh Flexi Cap)")
         ticker = st.text_input("Enter Ticker:", value="0P0000XW8F.BO")
+    elif asset_type == "Custom (Any Ticker)":
+        st.info("Koi bhi Yahoo Finance ticker likhein (e.g., AMZN, NFLX, GOLD, BAJAJ-AUTO.NS, SOL-USD)")
+        ticker = st.text_input("Enter Custom Ticker:", value="")
         
     period = st.selectbox("Time Period:", ["1mo", "3mo", "6mo", "1y", "2y", "5y", "10y"], index=3)
     
@@ -351,18 +355,22 @@ with tab_options:
         f_and_o_stocks = [
             "Select Stock...", "NIFTY (^NSEI)", "BANK NIFTY (^NSEBANK)", 
             "RELIANCE.NS", "HDFCBANK.NS", "ICICIBANK.NS", "TCS.NS", "INFY.NS", 
-            "TATAMOTORS.NS", "SBIN.NS", "ADANIENT.NS"
+            "TATAMOTORS.NS", "SBIN.NS", "ADANIENT.NS",
+            "✏️ Custom (Enter Below)"
         ]
         
         # Function to update ticker when dropdown changes
         def update_ticker():
-            if st.session_state.stock_select != "Select Stock...":
+            if st.session_state.stock_select not in ["Select Stock...", "✏️ Custom (Enter Below)"]:
                 val = st.session_state.stock_select
                 ticker = val.split(" (")[1].replace(")", "") if " (" in val else val
                 st.session_state.opt_ticker = ticker
 
         st.selectbox("Quick Select (Popular Stocks):", f_and_o_stocks, key="stock_select", on_change=update_ticker)
         opt_ticker = st.text_input("Or Enter Custom Ticker:", key="opt_ticker", value="RELIANCE.NS")
+        
+        if st.session_state.get('stock_select') == "✏️ Custom (Enter Below)":
+            st.info("👆 Upar apna custom ticker type karein (e.g., BAJAJ-AUTO.NS, AMZN, BTC-USD)")
         
         if st.button("Fetch Option Chain 🔍"):
             with st.spinner("Fetching Expiry Dates..."):
